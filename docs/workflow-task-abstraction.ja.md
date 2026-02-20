@@ -1,161 +1,190 @@
-# Workflow/Task 抽象化 再設計案 v3
+# Workflow/Task 抽象化 再設計案 v4
 
-最終更新: 2026-02-17  
-対象: `multi-agent-system-research`  
-方針: mailbox-first PoC を、長期運用できる swarm 実行基盤へ進化させる。
+最終更新: 2026-02-20
+対象: `agent-symphony`
 
-## 0. 参照した外部コンテキスト
+## 0. 設計ゴール
 
-1. Swarm Tools: https://github.com/joelhooks/swarm-tools
-2. Claude swarm orchestration skill gist: https://gist.github.com/kieranklaassen/4f2aba89594a4aea4ad64d753984b2ea
+1. `codex/claude` など CLI agent の実行特性に合わせ、`persistent agent session` をデフォルトにする。
+2. `mailbox` と `agent lifecycle` を完全分離する。
+3. 応答は `event-driven trigger` を基本にし、polling はフォールバックに限定する。
+4. モジュール間依存を最小化し、拡張時に kernel が肥大化しない構造にする。
 
-この2つから取り入れる中核は以下。
+## 1. 設計原則
 
-1. local-first で永続化される team/task/message 状態
-2. 短命 subtask agent と常駐 teammate agent の併用
-3. task dependency + inbox message による協調
-4. event log を中心にした復元可能性
-5. 並列 specialist pattern と pipeline pattern の共存
+1. **Kernel is decider**: AIは提案者、Kernelが遷移を確定。
+2. **Port/Adapter first**: provider差分、transport差分は adapter に閉じる。
+3. **Event-sourced state**: すべての重要状態は event-ledger を唯一ソースにする。
+4. **Session over Prompt**: 文脈は毎回要約よりセッション継続を優先。
+5. **Trigger-first execution**: `task_ready` 等のイベントで起動し、常時pollしない。
 
-## 1. 目的
+## 2. レイヤー構造
 
-1. 並列 review だけでなく、implement/refactor/research/test/document を同じ抽象で扱う。
-2. agent 種別が増えても runtime monolith に戻らないモジュール境界を作る。
-3. DX と運用性を同時に保つ。
+### 2.1 Domain Kernel Layer
 
-## 2. 最上位抽象
-
-1. `SwarmRun`: 実行単位。team/task/message/policy snapshot を束ねる。
-2. `WorkflowSpec`: 制御契約。phase/gate/loop/budget/decomposition policy を持つ。
-3. `WorkGraph`: 実行計画。依存、優先度、capability、reservation を持つ DAG。
-4. `AgentProfile`: `provider/model/instruction/role/capabilities` を持つ agent 宣言。
-5. `TaskAttempt`: lease と retry 文脈を持つ実行試行。
-6. `Envelope`: agent 間通信の標準契約。
-7. `Artifact`: 中間/最終成果物。
-8. `OutcomePattern`: 成功失敗パターンの学習対象。
-
-## 3. モジュール分割 (v3)
-
-`runtime` は composition root に限定し、以下を明示モジュール化する。
-
-1. `runspace`
+1. `run-registry`
 2. `workflow-compiler`
-3. `task-graph-engine`
-4. `scheduler`
-5. `agent-mesh`
-6. `coordination-bus`
-7. `state-ledger`
-8. `artifact-memory`
-9. `policy-governance`
-10. `control-api`
+3. `task-graph`
+4. `policy-engine`
+5. `scheduler`
 
-## 4. 各モジュール責務
+### 2.2 Orchestration Layer
 
-1. `runspace`: SwarmRun の lifecycle と team membership を管理。
+1. `execution-dispatcher`
+2. `agent-session-manager`
+3. `trigger-router`
+
+### 2.3 Infrastructure Layer
+
+1. `event-ledger`
+2. `mailbox-transport`
+3. `agent-adapter-registry`
+4. `artifact-memory`
+5. `observability`
+
+### 2.4 Entry Layer
+
+1. `control-api`
+
+## 3. モジュール責務
+
+1. `run-registry`: run/session/agent profile の登録・参照。
 2. `workflow-compiler`: `WorkflowSpec -> WorkGraph seed` を生成。
-3. `task-graph-engine`: task lifecycle、dependency、GraphDelta 適用を管理。
-4. `scheduler`: ready 集合から claim 対象を選び、fairness/QoS を適用。
-5. `agent-mesh`: agent spawn/heartbeat/shutdown と attempt 実行を管理。
-6. `coordination-bus`: inbox/ack/nack/defer/deadletter を提供。
-7. `state-ledger`: append-only event + projection + outbox を提供。
-8. `artifact-memory`: artifact 管理と outcome pattern 管理を提供。
-9. `policy-governance`: policy snapshot と admission/authorization を管理。
-10. `control-api`: CLI/SDK/MCP 入口を提供。
+3. `task-graph`: 依存解決、claim、attempt反映、GraphDelta適用。
+4. `policy-engine`: authorize、dispatch mode決定、guardrail判定。
+5. `scheduler`: ready集合から候補を選抜。
+6. `execution-dispatcher`: `task_ready` 受信後の実行割当・起動。
+7. `agent-session-manager`: session lifecycle と heartbeat 管理。
+8. `trigger-router`: watcher/tmux/system timer の信号を正規化。
+9. `event-ledger`: append-only event + projection + subscription。
+10. `mailbox-transport`: message publish/consume/ack/nack のみ。
+11. `agent-adapter-registry`: codex/claude/local adapter ルーティング。
+12. `artifact-memory`: artifact + outcome pattern 保存。
+13. `observability`: trace/metric/log 契約。
+14. `control-api`: 外部 command 入口。
 
-## 5. subtask と teammate の同居
+## 4. 明示的な依存ルール（疎結合）
 
-agent 実行形態を first-class で2種類持つ。
+1. `task-graph` は `mailbox-transport` を知らない。
+2. `agent-session-manager` は `mailbox-transport` を知らない。
+3. `scheduler` は `agent-adapter` を知らない。
+4. `execution-dispatcher` が `scheduler + policy + session + adapter` を束ねる。
+5. 永続化I/Oは `event-ledger` と `artifact-memory` に限定。
+6. `control-api` は domain ports を呼ぶだけで、実装詳細を持たない。
 
-1. `subtask`: 1タスク向け短命 worker。
-2. `teammate`: 複数タスクを継続処理する常駐 worker。
+## 5. mailbox と lifecycle の分離
 
-違いは spawn policy に閉じ、共通実行契約は `TaskAttempt` で統一する。
+### 5.1 mailbox の責務
 
-## 6. command/event の最小契約
+1. envelope輸送
+2. ack/nack/deadletter
+3. at-least-once 配送
 
-### 6.1 Command
+### 5.2 lifecycle の責務
+
+1. agent session 作成/再利用/停止
+2. heartbeat と timeout 監視
+3. stale session の隔離
+4. graceful shutdown handshake
+
+## 6. Agent Lifecycle モデル
+
+状態:
+
+1. `registered`
+2. `idle`
+3. `reserved`
+4. `assigned`
+5. `running`
+6. `draining`
+7. `stopped`
+8. `crashed`
+
+デフォルト戦略:
+
+1. roleが継続作業型なら `persistent`。
+2. 単発/隔離が必要なケースだけ `oneshot`。
+3. `max_tasks_per_session` または `max_session_ttl` 到達で rotate。
+
+## 7. 応答モデル（trigger-first）
+
+### 7.1 主要トリガ
+
+1. `task_ready`
+2. `attempt_timeout`
+3. `message_arrived`
+4. `session_heartbeat_timeout`
+5. `manual_control_command`
+
+### 7.2 trigger router の入力源
+
+1. fs watcher（ledger/outbox/mailbox更新）
+2. tmux event hook
+3. process exit event
+4. timer（fallback polling）
+
+### 7.3 fallback polling
+
+1. watcher異常時のみ有効化
+2. adaptive backoff
+3. trigger復旧後に自動停止
+
+## 8. command/event 最小契約
+
+### 8.1 Command
 
 1. `CreateRun`
-2. `RegisterAgent`
-3. `CompileWorkflow`
-4. `ApplyGraphDelta`
-5. `ClaimTask`
-6. `CompleteAttempt`
-7. `FailAttempt`
-8. `SendMessage`
-9. `RequestPlanApproval`
-10. `ApprovePlan`
-11. `RequestShutdown`
-12. `ApproveShutdown`
+2. `RegisterAgentProfile`
+3. `StartSession`
+4. `CompileWorkflow`
+5. `ApplyGraphDelta`
+6. `ClaimTask`
+7. `ExecuteAttempt`
+8. `CompleteAttempt`
+9. `FailAttempt`
+10. `RequestShutdown`
+11. `ApproveShutdown`
 
-### 6.2 Event
+### 8.2 Event
 
 1. `run_created`
-2. `agent_registered`
-3. `workflow_compiled`
-4. `graph_delta_applied`
-5. `task_claimed`
-6. `attempt_completed`
-7. `attempt_failed`
-8. `message_sent`
-9. `plan_approval_requested`
-10. `plan_approved`
-11. `shutdown_requested`
-12. `shutdown_approved`
-13. `outcome_recorded`
+2. `agent_profile_registered`
+3. `session_started`
+4. `session_heartbeat`
+5. `task_ready`
+6. `task_claimed`
+7. `attempt_started`
+8. `attempt_completed`
+9. `attempt_failed`
+10. `shutdown_requested`
+11. `shutdown_approved`
 
-## 7. Kernel 不変条件
+## 9. Kernel不変条件
 
-1. 状態変更の唯一ソースは `state-ledger` の append event。
-2. `WorkflowSpec` は epoch 単位で immutable。`WorkGraph` は導出状態。
-3. GraphDelta は `policy-governance` と `task-graph-engine` の双方で検証。
-4. 1 task の有効 lease は同時に1つ。
-5. idempotency key と lease fencing token がない mutation は拒否。
-6. shutdown は request/approve handshake でのみ成立。
+1. 状態遷移は必ず ledger event を伴う。
+2. `WorkflowSpec` は epoch単位で immutable。
+3. lease + fencing token なしの completion は拒否。
+4. taskへの同時有効leaseは1つ。
+5. dispatch mode は policy-engine が最終決定。
 
-## 8. スケジューリング方針
+## 10. 拡張点
 
-1. 基本は pull+lease。
-2. fairness は tree 単位と service class を併用。
-3. starvation SLO (`max_wait` または `min_share`) を契約化。
-4. reservation conflict は policy-governance が最終判定。
-5. self-organizing swarm は claim loop policy として表現。
+1. provider追加: `agent-adapter-registry` に adapterを追加するだけ。
+2. transport追加: `mailbox-transport` adapter差し替えのみ。
+3. scheduler戦略追加: `SchedulerPort` 実装差し替えのみ。
+4. memory追加: `artifact-memory` backend差し替えのみ。
 
-## 9. 表現可能な workflow
+## 11. 実装フェーズ（推奨）
 
-1. 並列 specialist review
-2. `research -> plan -> implement -> test -> review` pipeline
-3. plan の反復 review loop
-4. implement 中の code/doc/test 並列協業
-5. run 中の動的 decomposition
-6. 複数 worker による task pool self-organizing claim
+1. `event-ledger` + `run-registry` の最小実装。
+2. `agent-session-manager` + `agent-adapter-registry` で persistent session 稼働。
+3. `task-graph` + `scheduler` + `execution-dispatcher` 接続。
+4. `trigger-router` を watcher中心で導入し polling fallback を追加。
+5. `mailbox-transport` を非同期協調チャネルとして接続。
 
-## 10. DX 設計 (agents 定義)
+## 12. この設計の意味
 
-`agents.yaml` は最小入力を原則にする。
-
-1. 必須: `id`, `role`, `provider`
-2. 推奨: `model`, `instruction`, `capabilities`
-3. 自動補完: `command_template`, `allowed_message_types`, `default_env_profile`
-4. override は allowlist 方式に制限
-
-## 11. 運用設計
-
-1. graceful shutdown sequence を標準化。
-2. crashed teammate は heartbeat timeout で inactive 化。
-3. deadletter は redrive token 付きで再投入可能にする。
-4. decision trace (`decision_id`, `cause_event_ids`, `policy_snapshot_id`) を必須化。
-
-## 12. 実装優先順
-
-1. `state-ledger` 中心に command/event 契約を先に固定。
-2. `runspace` + `agent-mesh` で subtask/teammate の両モードを接続。
-3. `workflow-compiler` と `task-graph-engine` を分離して GraphDelta 経路を固定。
-4. `scheduler` と `policy-governance` の QoS/fairness 契約を導入。
-5. `artifact-memory` の学習ループを最後に導入。
-
-## 13. 旧案との要点差分
-
-1. mailbox 中心から runspace 中心へ移行。
-2. workflow/DAG 分離は維持しつつ lineage と policy snapshot を前提化。
-3. review 最適化 PoC から、多用途 swarm 実行基盤へ責務を拡張。
+1. mailboxとlifecycleの責務衝突を解消する。
+2. 文脈維持をセッション寿命で担保し、都度要約コストを下げる。
+3. event-driven中心で、無駄な常時pollingコストを抑える。
+4. module単位で独立進化できるため、長期拡張に耐える。

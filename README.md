@@ -1,28 +1,38 @@
 # agent-symphony
 
-Local-first multi-agent orchestration kernel.
+Local-first multi-agent orchestration kernel focused on long-lived agent sessions.
 
-## Scope
+## Design Stance
 
-- Runspace-first orchestration model
-- Workflow contract + WorkGraph execution separation
-- Subtask + Teammate dual execution modes
-- Event-sourced state ledger and coordination bus contracts
+- Persistent agent session is default
+- Event-driven trigger is default
+- Polling is fallback only
+- Mailbox transport and agent lifecycle are separated
 
-## Initial Modules
+## Architecture (v4)
 
-- `src/modules-v3/types.ts`
-- `src/modules-v3/runspace.ts`
-- `src/modules-v3/workflow-compiler.ts`
-- `src/modules-v3/task-graph-engine.ts`
-- `src/modules-v3/scheduler.ts`
-- `src/modules-v3/agent-mesh.ts`
-- `src/modules-v3/coordination-bus.ts`
-- `src/modules-v3/state-ledger.ts`
-- `src/modules-v3/artifact-memory.ts`
-- `src/modules-v3/policy-governance.ts`
-- `src/modules-v3/control-api.ts`
+See `docs/workflow-task-abstraction.ja.md`.
 
-## Docs
+### Modules
 
-- `docs/workflow-task-abstraction.ja.md`
+- `src/modules-v4/types.ts`
+- `src/modules-v4/run-registry.ts`
+- `src/modules-v4/workflow-compiler.ts`
+- `src/modules-v4/task-graph.ts`
+- `src/modules-v4/policy-engine.ts`
+- `src/modules-v4/scheduler.ts`
+- `src/modules-v4/event-ledger.ts`
+- `src/modules-v4/mailbox-transport.ts`
+- `src/modules-v4/agent-adapter.ts`
+- `src/modules-v4/agent-session-manager.ts`
+- `src/modules-v4/trigger-router.ts`
+- `src/modules-v4/execution-dispatcher.ts`
+- `src/modules-v4/artifact-memory.ts`
+- `src/modules-v4/observability.ts`
+- `src/modules-v4/control-api.ts`
+
+## Build
+
+```bash
+npm run build
+```
